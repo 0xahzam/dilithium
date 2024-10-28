@@ -1,157 +1,124 @@
 """
 CRYSTALS-Dilithium Implementation
 
-This module implements the key generation part of the Dilithium digital signature scheme
-using the polynomial ring arithmetic defined in rings.py.
-
-Key components:
-1. Matrix A: k x l matrix of uniformly random polynomials
-2. Secret vectors: s1 (l x 1) and s2 (k x 1) of small polynomials
-3. Public key: (A, t) where t = As1 + s2
+This is a structured implementation of Dilithium's key generation using:
+1. Ring operations from rings.py
+2. Deterministic randomness from hash.py (SHAKE128)
 """
 
 from rings import Polynomial
-import random
+from hash import expand_seed, generate_matrix_from_seed
+import secrets  # For secure random seed generation
 
 # Dilithium Parameters
-# For this implementation we'll use NIST level 2 parameters
 # Reference: https://www.researchgate.net/figure/Dilithium-parameter-sets-for-NIST-security-levels-2-3-and-5-with-corresponding-expected_tbl2_362263379
-K = 4  # matrix height
-L = 4  # matrix width
-ETA = 2  # bound for sampling small polynomials
+PARAMS = {
+    2: {"k": 4, "l": 4, "eta": 2},  # NIST Security Level 2
+    3: {"k": 6, "l": 5, "eta": 4},  # NIST Security Level 3
+    5: {"k": 8, "l": 7, "eta": 2},  # NIST Security Level 5
+}
 
 
-def generate_uniform_poly():
-    """
-    Generate a polynomial with coefficients uniform in [0, Q-1]
-    Used for matrix A elements
-    """
-    coeffs = [random.randrange(Polynomial.Q) for _ in range(Polynomial.N)]
-    return Polynomial(coeffs)
+class Dilithium:
+    def __init__(self, security_level=2):
+        """Initialize Dilithium with desired security level"""
+        if security_level not in PARAMS:
+            raise ValueError("Security level must be 2, 3, or 5")
 
+        params = PARAMS[security_level]
+        self.k = params["k"]  # Matrix height
+        self.l = params["l"]  # Matrix width
+        self.eta = params["eta"]  # Bound for small coefficients
 
-def generate_small_poly():
-    """
-    Generate a polynomial with "small" coefficients in [-ETA, ETA]
-    Used for secret vectors s1, s2
-    """
-    coeffs = [random.randint(-ETA, ETA) for _ in range(Polynomial.N)]
-    return Polynomial(coeffs)
+    def generate_small_poly(self):
+        """Generate polynomial with coefficients in [-eta, eta]"""
+        # Example: if eta=2, coefficients are in {-2, -1, 0, 1, 2}
+        seed = secrets.token_bytes(32)
+        coeffs = []
 
+        # Get randomness from SHAKE128
+        randomness = expand_seed(seed, 0x03, Polynomial.N)  # 0x03 domain for small poly
+        for byte in randomness:
+            # Convert byte to coefficient in [-eta, eta]
+            coeff = byte % (2 * self.eta + 1) - self.eta
+            coeffs.append(coeff)
 
-def generate_matrix_A(k: int, l: int):
-    """
-    Generate k x l matrix A with uniform random polynomials
-    """
-    return [[generate_uniform_poly() for _ in range(l)] for _ in range(k)]
+        return Polynomial(coeffs[: Polynomial.N])
 
+    def keygen(self):
+        """
+        Generate Dilithium keypair
+        Returns (public_key, private_key)
+        """
+        # 1. Generate random seed for matrix A (32 bytes)
+        rho = secrets.token_bytes(32)
 
-def matrix_vector_multiply(matrix, vector):
-    """
-    Multiply matrix A with vector s1
-    Returns resulting vector
-    """
-    k = len(matrix)
-    l = len(matrix[0])
-    result = []
+        # 2. Generate matrix A deterministically from seed
+        A = generate_matrix_from_seed(rho, self.k, self.l)
 
-    for i in range(k):
-        sum_poly = Polynomial()  # zero polynomial
-        for j in range(l):
-            product = matrix[i][j] * vector[j]
-            sum_poly = sum_poly + product
-        result.append(sum_poly)
+        # 3. Generate secret vectors with small coefficients
+        s1 = [self.generate_small_poly() for _ in range(self.l)]
+        s2 = [self.generate_small_poly() for _ in range(self.k)]
 
-    return result
+        # 4. Compute t = As1 + s2
+        t = []
+        for i in range(self.k):
+            row_sum = s2[i]  # Start with s2[i]
+            for j in range(self.l):
+                row_sum = row_sum + A[i][j] * s1[j]
+            t.append(row_sum)
 
-
-def generate_keys():
-    """
-    Generate Dilithium keypair
-    Returns (public_key, private_key)
-    """
-    # 1. Generate uniform random matrix A
-    A = generate_matrix_A(K, L)
-
-    # 2. Generate small secret vectors s1 and s2
-    s1 = [generate_small_poly() for _ in range(L)]
-    s2 = [generate_small_poly() for _ in range(K)]
-
-    # 3. Compute t = As1 + s2
-    As1 = matrix_vector_multiply(A, s1)
-    t = [As1[i] + s2[i] for i in range(K)]
-
-    public_key = (A, t)
-    private_key = (s1, s2)
-
-    return public_key, private_key
+        # Public key is (rho, t), where rho is seed for A
+        # Private key is (s1, s2)
+        return (rho, t), (s1, s2)
 
 
 def test_keygen():
-    """
-    Test key generation and print key components in a readable format
-    """
-    public_key, private_key = generate_keys()
-    A, t = public_key
+    """Test key generation with detailed output"""
+    print("\n=== DILITHIUM KEY GENERATION TEST ===")
+
+    # Create instance with security level 2
+    dilithium = Dilithium(security_level=2)
+    print(f"\nParameters:")
+    print(f"k = {dilithium.k} (matrix rows)")
+    print(f"l = {dilithium.l} (matrix columns)")
+    print(f"η = {dilithium.eta} (coefficient bound)")
+
+    # Generate keys
+    public_key, private_key = dilithium.keygen()
+    rho, t = public_key
     s1, s2 = private_key
 
-    print("=== DILITHIUM KEY GENERATION TEST ===")
-
-    # Print summary of matrix A
     print("\n--- Public Key ---")
-    print(f"Matrix A ({K}x{L}):")
-    print("Sample entries (showing first few terms of each polynomial):")
-    for i in range(min(2, K)):
-        for j in range(min(2, L)):
-            terms = str(A[i][j]).split("+")[:3]  # Get first 3 terms
-            print(
-                f"A[{i},{j}] = {' + '.join(terms)}{'...' if len(str(A[i][j]).split('+')) > 3 else ''}"
-            )
-    print("..." if K > 2 else "")
-
-    # Print summary of vector t
-    print("\nVector t:")
-    for i in range(min(2, K)):
+    print(f"rho (seed for A): {rho.hex()}")
+    print("\nVector t (sample entries):")
+    for i in range(min(2, len(t))):
         terms = str(t[i]).split("+")[:3]
-        print(
-            f"t[{i}] = {' + '.join(terms)}{'...' if len(str(t[i]).split('+')) > 3 else ''}"
-        )
-    print("..." if K > 2 else "")
+        print(f"t[{i}] = {' + '.join(terms)}...")
 
-    # Print summary of private key
     print("\n--- Private Key ---")
-    print("Vector s1 (small coefficients in [-η, η]):")
-    for i in range(min(2, L)):
-        terms = str(s1[i]).split("+")[:3]
-        print(
-            f"s1[{i}] = {' + '.join(terms)}{'...' if len(str(s1[i]).split('+')) > 3 else ''}"
-        )
-    print("..." if L > 2 else "")
+    print("Vector s1 (sample entries):")
+    for i in range(min(2, len(s1))):
+        print(f"s1[{i}] = {s1[i]}")
 
-    print("\nVector s2 (small coefficients in [-η, η]):")
-    for i in range(min(2, K)):
-        terms = str(s2[i]).split("+")[:3]
-        print(
-            f"s2[{i}] = {' + '.join(terms)}{'...' if len(str(s2[i]).split('+')) > 3 else ''}"
-        )
-    print("..." if K > 2 else "")
-
-    # Print statistics
-    print("\n--- Key Statistics ---")
-    print(f"Matrix dimensions: {K}x{L}")
-    print(f"Polynomial degree: {Polynomial.N-1}")
-    print(f"Coefficient modulus q: {Polynomial.Q}")
-    print(f"Small coefficient bound η: {ETA}")
+    print("\nVector s2 (sample entries):")
+    for i in range(min(2, len(s2))):
+        print(f"s2[{i}] = {s2[i]}")
 
     # Verify t = As1 + s2
     print("\n--- Verification ---")
-    As1 = matrix_vector_multiply(A, s1)
-    t_verify = [As1[i] + s2[i] for i in range(K)]
+    A = generate_matrix_from_seed(rho, dilithium.k, dilithium.l)
+    t_verify = []
+    for i in range(dilithium.k):
+        row_sum = s2[i]
+        for j in range(dilithium.l):
+            row_sum = row_sum + A[i][j] * s1[j]
+        t_verify.append(row_sum)
 
-    matches = all(t[i].coefficients == t_verify[i].coefficients for i in range(K))
+    matches = all(
+        t[i].coefficients == t_verify[i].coefficients for i in range(dilithium.k)
+    )
     print(f"Key verification: {'✓ successful' if matches else '✗ failed'}")
-
-    return matches
 
 
 if __name__ == "__main__":

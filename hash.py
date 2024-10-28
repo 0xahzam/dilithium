@@ -1,125 +1,203 @@
 """
-SHAKE128 Implementation for Dilithium using PyCryptodome
+Optimized SHAKE128 Implementation for Dilithium
 
-Key Components:
-1. SHAKE128: An eXtendable Output Function (XOF) from SHA-3 family
-  - Can produce output of any desired length
-  - '128' indicates security level in bits
-  - Based on Keccak sponge construction
-  - Standardized in FIPS 202
-
-2. Usage in Dilithium:
-  a. Deterministic Matrix Generation:
-     - Generate matrix A from small seed
-     - Makes public keys smaller (store seed instead of matrix)
-     - Ensures reproducibility
+Key optimizations:
+1. Batch operations with numpy
+2. Cached matrix generation
+3. Vectorized coefficient generation
+4. Pre-allocated buffers
 """
 
 from Crypto.Hash import SHAKE128
+import numpy as np
+from functools import lru_cache
+from rings import Polynomial
 
-# Domain separators to prevent cross-protocol attacks
+# Domain separators
 DOMAIN_MATRIX = 0x01
 DOMAIN_CHALLENGE = 0x02
+DOMAIN_MESSAGE = 0x04
+
+# Constants
+TAU = 60  # Number of ±1's in challenge polynomial
+CHUNK_SIZE = 4  # Bytes per coefficient
 
 
+class OptimizedHasher:
+    def __init__(self):
+        """Initialize with reusable SHAKE128 instances"""
+        self._shake = SHAKE128.new()
+        self._matrix_cache = {}
+
+    def reset(self):
+        """Reset SHAKE instance"""
+        self._shake = SHAKE128.new()
+        return self
+
+    @staticmethod
+    @lru_cache(maxsize=32)
+    def expand_seed(seed: bytes, domain: int, length: int) -> bytes:
+        """Cached seed expansion"""
+        shake = SHAKE128.new()
+        shake.update(seed + bytes([domain]))
+        return shake.read(length)
+
+    def generate_matrix(self, seed: bytes, k: int, l: int) -> list:
+        """
+        Optimized matrix generation with caching and vectorized operations.
+        """
+        # Check cache first
+        cache_key = (seed, k, l)
+        if cache_key in self._matrix_cache:
+            return self._matrix_cache[cache_key]
+
+        # Pre-allocate matrix
+        matrix = [[None for _ in range(l)] for _ in range(k)]
+
+        # Generate all randomness at once
+        total_coeffs = k * l * Polynomial.N
+        total_bytes = total_coeffs * CHUNK_SIZE
+
+        # Single SHAKE call for all coefficients
+        shake = SHAKE128.new()
+        shake.update(seed + bytes([DOMAIN_MATRIX]))
+        all_data = np.frombuffer(shake.read(total_bytes), dtype=np.uint8)
+
+        # Reshape data for vectorized processing
+        coeffs_array = all_data.reshape(-1, CHUNK_SIZE)
+
+        # Convert to coefficients using vectorized operations
+        coeffs = np.zeros(total_coeffs, dtype=np.int32)
+
+        # Process 4-byte chunks efficiently
+        coeffs = (
+            coeffs_array[:, 0].astype(np.int32)
+            | (coeffs_array[:, 1].astype(np.int32) << 8)
+            | (coeffs_array[:, 2].astype(np.int32) << 16)
+            | (coeffs_array[:, 3].astype(np.int32) << 24)
+        )
+
+        # Modulo operation on whole array
+        coeffs = coeffs % Polynomial.Q
+
+        # Reshape into matrix of polynomials
+        coeffs = coeffs.reshape(k, l, Polynomial.N)
+
+        # Convert to polynomials
+        for i in range(k):
+            for j in range(l):
+                matrix[i][j] = Polynomial(coeffs[i, j])
+
+        # Cache result
+        self._matrix_cache[cache_key] = matrix
+        return matrix
+
+    def hash_message(self, message: bytes) -> bytes:
+        """Optimized message hashing"""
+        self.reset()
+        self._shake.update(bytes([DOMAIN_MESSAGE]) + message)
+        return self._shake.read(32)
+
+    def generate_challenge(
+        self, message: bytes, public_key: tuple, w1: list
+    ) -> Polynomial:
+        """Optimized challenge generation"""
+        rho, _ = public_key
+
+        # Hash message
+        mu = self.hash_message(message)
+
+        # Initialize SHAKE
+        self.reset()
+        self._shake.update(mu)
+        self._shake.update(rho)
+
+        # Efficiently process w1 coefficients
+        for poly in w1:
+            coeffs = np.array(poly.coefficients, dtype=np.int32)
+            self._shake.update(coeffs.tobytes())
+
+        self._shake.update(bytes([DOMAIN_CHALLENGE]))
+
+        # Generate challenge coefficients efficiently
+        challenge_bytes = np.frombuffer(self._shake.read(TAU * 2), dtype=np.uint8)
+
+        # Pre-allocate coefficient array
+        coeffs = np.zeros(Polynomial.N, dtype=np.int32)
+
+        # Process positions and signs efficiently
+        positions = (
+            challenge_bytes[::2].astype(np.uint16)
+            | (challenge_bytes[1::2].astype(np.uint16) << 8)
+        ) % Polynomial.N
+
+        signs = np.where(challenge_bytes[::2] & 0x80, 1, -1)
+
+        # Fill unique positions
+        used_positions = set()
+        pos_idx = 0
+
+        while len(used_positions) < TAU and pos_idx < len(positions):
+            pos = positions[pos_idx]
+            if pos not in used_positions:
+                coeffs[pos] = signs[pos_idx]
+                used_positions.add(pos)
+            pos_idx += 1
+
+        return Polynomial(coeffs)
+
+
+# Global instance for reuse
+HASHER = OptimizedHasher()
+
+
+# Optimized interface functions
 def expand_seed(seed: bytes, domain: int, length: int) -> bytes:
-    """
-    Expand a seed to desired length using SHAKE128 with domain separation.
-
-    Args:
-        seed: Input seed bytes
-        domain: Domain separator (prevents attacks across different uses)
-        length: Desired output length in bytes
-
-    Returns:
-        bytes: Expanded seed of specified length
-    """
-    shake = SHAKE128.new()
-    shake.update(seed + bytes([domain]))
-    return shake.read(length)
+    return OptimizedHasher.expand_seed(seed, domain, length)
 
 
 def generate_matrix_from_seed(seed: bytes, k: int, l: int) -> list:
-    """
-    Deterministically generate matrix A from seed.
-    Each matrix element is a polynomial in ring Zq[X]/(X^N + 1).
-
-    Process:
-    1. Use seed + position + domain to generate randomness
-    2. Convert randomness to polynomial coefficients
-    3. Ensure coefficients are properly reduced modulo q
-
-    Args:
-        seed: 32-byte random seed
-        k: Number of rows in matrix
-        l: Number of columns in matrix
-
-    Returns:
-        list: k x l matrix of polynomials
-    """
-    from rings import Polynomial
-
-    # Initialize empty k × l matrix
-    matrix = []
-
-    for i in range(k):
-        row = []
-        for j in range(l):
-            # 1. Generate unique randomness for position (i,j)
-            shake = SHAKE128.new()
-            # Make input unique by concatenating:
-            # - seed: base randomness (same for whole matrix)
-            # - [i, j]: position indicators (unique per position)
-            # - DOMAIN_MATRIX: separates this use from other SHAKE128 uses
-            shake.update(seed + bytes([i, j, DOMAIN_MATRIX]))
-
-            # 2. Generate randomness for polynomial coefficients
-            # Need 256 coefficients (degree N-1 polynomial)
-            # Each coefficient needs 4 bytes because:
-            # - q = 8,380,417 needs 23 bits
-            # - 4 bytes = 32 bits is enough to cover this
-            data = shake.read(Polynomial.N * 4)  # 256 * 4 = 1024 bytes
-
-            # 3. Convert bytes to coefficients modulo q
-            coeffs = []
-            # Take 4 bytes at a time from data
-            for idx in range(0, len(data), 4):
-                # Convert 4 bytes to integer (little-endian)
-                # Example: b'\x01\x02\x03\x04' -> 67,305,985
-                coeff = int.from_bytes(data[idx : idx + 4], "little")
-                # Reduce modulo q to get valid coefficient
-                coeffs.append(coeff % Polynomial.Q)
-
-            # 4. Create polynomial with these coefficients
-            # and add to current matrix position
-            row.append(Polynomial(coeffs))
-        matrix.append(row)
-
-    return matrix
+    return HASHER.generate_matrix(seed, k, l)
 
 
-def test_hash_functions():
-    """
-    Test vectors and functionality verification for hash operations
-    """
-    print("=== SHAKE128 Function Tests ===\n")
+def hash_message(message: bytes) -> bytes:
+    return HASHER.hash_message(message)
 
-    # Test 1: Seed expansion
-    seed = b"test_seed"
-    print("Test seed expansion:")
-    expanded = expand_seed(seed, DOMAIN_MATRIX, 32)
-    print(f"Input seed: {seed.hex()}")
-    print(f"Expanded (32 bytes): {expanded.hex()}\n")
 
-    # Test 2: Matrix generation (small example)
-    print("Test matrix generation (2x2 sample):")
-    matrix = generate_matrix_from_seed(seed, 2, 2)
-    for i in range(2):
-        for j in range(2):
-            terms = str(matrix[i][j]).split("+")[:2]
-            print(f"A[{i},{j}] = {' + '.join(terms)}...")
-    print()
+def generate_challenge(message: bytes, public_key: tuple, w1: list) -> Polynomial:
+    return HASHER.generate_challenge(message, public_key, w1)
+
+
+def test_performance():
+    """Performance test"""
+    import time
+
+    print("=== Hash Operations Performance Test ===\n")
+
+    # Test seed expansion
+    start = time.time()
+    seed = b"test_seed" * 4
+    for _ in range(1000):
+        expanded = expand_seed(seed, DOMAIN_MATRIX, 32)
+    print(f"1000 seed expansions: {time.time() - start:.3f} seconds")
+
+    # Test matrix generation
+    start = time.time()
+    matrix = generate_matrix_from_seed(seed, 4, 4)
+    print(f"4x4 matrix generation: {time.time() - start:.3f} seconds")
+
+    # Test cached matrix generation
+    start = time.time()
+    matrix = generate_matrix_from_seed(seed, 4, 4)
+    print(f"Cached matrix generation: {time.time() - start:.3f} seconds")
+
+    # Test challenge generation
+    dummy_w1 = [Polynomial([1, 2, 3]) for _ in range(4)]
+    start = time.time()
+    for _ in range(100):
+        c = generate_challenge(b"test message", (seed, dummy_w1), dummy_w1)
+    print(f"100 challenge generations: {time.time() - start:.3f} seconds")
 
 
 if __name__ == "__main__":
-    test_hash_functions()
+    test_performance()

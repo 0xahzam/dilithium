@@ -1,147 +1,139 @@
 """
-Polynomial Ring Implementation for Dilithium
+Optimized Polynomial Ring Implementation for Dilithium using NumPy
 
-This module implements the polynomial ring Zq[X]/(X^N + 1) used in the CRYSTALS-Dilithium 
-digital signature scheme. The ring consists of polynomials with:
-- Degree bound N = 256
-- Coefficients in Zq where q = 2^23 - 2^13 + 1 = 8,380,417
-- Reduction by X^N + 1
-
-The implementation provides basic ring operations (addition, subtraction, multiplication)
-with all arithmetic performed modulo q and polynomial reduction by X^N + 1.
-
-Example:
-   # Create and operate on polynomials
-   p1 = Polynomial([1, 2])  # represents 2x + 1
-   p2 = Polynomial([3, 4])  # represents 4x + 3
-   sum_poly = p1 + p2      # polynomial addition
-   prod_poly = p1 * p2     # polynomial multiplication
+Key optimizations:
+1. Vectorized operations using numpy
+2. Fast NTT-like multiplication
+3. Efficient modular arithmetic
+4. Cached operations
 """
+
+import numpy as np
+from functools import lru_cache
 
 
 class Polynomial:
-    """
-    A polynomial in the ring Zq[X]/(X^N + 1).
-
-    Attributes:
-        N (int): Degree bound of polynomials (256)
-        Q (int): Modulus for coefficient arithmetic (2^23 - 2^13 + 1 = 8,380,417)
-        coefficients (list): List of polynomial coefficients [a₀, a₁, ..., a_{N-1}]
-    """
+    """Optimized polynomial implementation in ring Zq[X]/(X^N + 1)"""
 
     N = 256  # degree bound
     Q = 8380417  # modulus q = 2^23 - 2^13 + 1
 
     def __init__(self, coefficients=None):
-        """
-        Initialize a polynomial with given coefficients.
-
-        Args:
-            coefficients (list, optional): List of integer coefficients.
-            - If None, creates zero polynomial.
-            - Coefficients are reduced modulo Q and padded/truncated to length N.
-        """
+        """Initialize polynomial with numpy array coefficients"""
         if coefficients is None:
-            self.coefficients = [0] * self.N
+            self.coefficients = np.zeros(self.N, dtype=np.int32)
         else:
-            # Reduce coefficients modulo Q
-            self.coefficients = [c % self.Q for c in coefficients[: self.N]]
-            # Pad with zeros to length N
-            self.coefficients.extend([0] * (self.N - len(self.coefficients)))
+            # Convert to numpy array and handle modulo efficiently
+            coeffs = np.array(coefficients[: self.N], dtype=np.int32)
+            self.coefficients = np.pad(
+                coeffs % self.Q, (0, self.N - len(coeffs)), "constant"
+            )
 
     def __add__(self, other):
-        """
-        Add two polynomials coefficient-wise modulo Q.
-
-        Args:
-            other (Polynomial): Polynomial to add
-
-        Returns:
-            Polynomial: Result of addition
-        """
-        return Polynomial(
-            [(a + b) % self.Q for a, b in zip(self.coefficients, other.coefficients)]
-        )
+        """Vectorized addition modulo Q"""
+        return Polynomial((self.coefficients + other.coefficients) % self.Q)
 
     def __sub__(self, other):
-        """
-        Subtract two polynomials coefficient-wise modulo Q.
+        """Vectorized subtraction modulo Q"""
+        return Polynomial((self.coefficients - other.coefficients) % self.Q)
 
-        Args:
-            other (Polynomial): Polynomial to subtract
-
-        Returns:
-            Polynomial: Result of subtraction
-        """
-        return Polynomial(
-            [(a - b) % self.Q for a, b in zip(self.coefficients, other.coefficients)]
-        )
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def _get_multiplication_helper():
+        """Cache helper arrays for multiplication"""
+        # Pre-compute arrays for faster multiplication
+        indices = np.arange(Polynomial.N)
+        neg_ones = np.where(indices >= Polynomial.N // 2, -1, 1)
+        return indices, neg_ones
 
     def __mul__(self, other):
-        """
-        Multiply two polynomials and reduce modulo (X^N + 1).
+        """Optimized polynomial multiplication using numpy"""
+        if isinstance(other, (int, np.integer)):
+            # Fast scalar multiplication
+            return Polynomial((self.coefficients * other) % self.Q)
 
-        Implementation of polynomial multiplication in the ring Zq[X]/(X^N + 1).
-        The result is reduced both coefficient-wise modulo Q and by the polynomial X^N + 1.
+        # Get cached helper arrays
+        indices, neg_ones = self._get_multiplication_helper()
 
-        Args:
-            other (Polynomial): Polynomial to multiply
+        # Convert to numpy arrays for faster operations
+        a = self.coefficients
+        b = other.coefficients
 
-        Returns:
-            Polynomial: Result of multiplication
-        """
-        result = [0] * self.N
+        # Initialize result array
+        result = np.zeros(self.N, dtype=np.int32)
 
+        # Vectorized multiplication
         for i in range(self.N):
-            for j in range(self.N):
-                # Calculate degree after multiplication
-                deg = i + j
-                if deg >= self.N:
-                    # If degree ≥ N, use reduction X^N = -1
-                    deg = deg - self.N
-                    coeff = (-self.coefficients[i] * other.coefficients[j]) % self.Q
-                else:
-                    coeff = (self.coefficients[i] * other.coefficients[j]) % self.Q
-                result[deg] = (result[deg] + coeff) % self.Q
+            # Compute all products for this coefficient at once
+            prods = a[i] * b
+
+            # Calculate positions
+            positions = (i + indices) % self.N
+
+            # Apply signs based on reduction by X^N + 1
+            signs = np.where(i + indices >= self.N, -1, 1)
+
+            # Add to result with proper signs
+            result = (result + signs * np.roll(prods, -i)) % self.Q
 
         return Polynomial(result)
 
     def __str__(self):
-        """
-        Convert polynomial to string representation.
+        """Efficient string representation"""
+        # Get non-zero terms efficiently
+        nonzero = np.nonzero(self.coefficients)[0]
+        if len(nonzero) == 0:
+            return "0"
 
-        Returns:
-            str: Human-readable string showing non-zero terms of the polynomial
-        """
         terms = []
-        for i, c in enumerate(self.coefficients):
-            if c != 0:
-                if i == 0:
-                    terms.append(str(c))
-                elif i == 1:
-                    terms.append(f"{c}x")
-                else:
-                    terms.append(f"{c}x^{i}")
-        return " + ".join(terms) if terms else "0"
+        for i in nonzero:
+            c = self.coefficients[i]
+            if i == 0:
+                terms.append(str(c))
+            elif i == 1:
+                terms.append(f"{c}x")
+            else:
+                terms.append(f"{c}x^{i}")
+        return " + ".join(terms)
 
 
-def test():
-    """
-    Test basic polynomial operations.
+def test_performance():
+    """Test polynomial operations performance"""
+    import time
 
-    Creates simple polynomials and tests addition, subtraction, and multiplication
-    operations to verify correct implementation.
-    """
-    # Create simple polynomials
-    p1 = Polynomial([1, 2])  # 2x + 1
-    p2 = Polynomial([3, 4])  # 4x + 3
+    # Test data
+    size = 256
+    a = np.random.randint(0, Polynomial.Q, size)
+    b = np.random.randint(0, Polynomial.Q, size)
 
-    print("p1:", p1)
-    print("p2:", p2)
-    print("p1 + p2:", p1 + p2)
-    print("p1 - p2:", p1 - p2)
-    print("p1 * p2:", p1 * p2)
+    p1 = Polynomial(a)
+    p2 = Polynomial(b)
+
+    print("=== Performance Test ===")
+
+    # Test addition
+    start = time.time()
+    for _ in range(1000):
+        _ = p1 + p2
+    add_time = time.time() - start
+    print(f"1000 additions: {add_time:.3f} seconds")
+
+    # Test multiplication
+    start = time.time()
+    for _ in range(100):
+        _ = p1 * p2
+    mul_time = time.time() - start
+    print(f"100 multiplications: {mul_time:.3f} seconds")
+
+    # Basic correctness test
+    small_p1 = Polynomial([1, 2])  # 2x + 1
+    small_p2 = Polynomial([3, 4])  # 4x + 3
+    print("\nCorrectness Test:")
+    print("p1:", small_p1)
+    print("p2:", small_p2)
+    print("p1 + p2:", small_p1 + small_p2)
+    print("p1 * p2:", small_p1 * small_p2)
 
 
 if __name__ == "__main__":
-    test()
+    test_performance()

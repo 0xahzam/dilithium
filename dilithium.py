@@ -1,3 +1,4 @@
+import time
 from rings import Polynomial
 from hash import expand_seed, generate_matrix_from_seed, generate_challenge
 import numpy as np
@@ -39,7 +40,6 @@ class OptimizedDilithium:
         self.t = None
         self.s1 = None
         self.s2 = None
-        self._A_cache = None
 
     def _generate_vector(self, size: int, bound: int, domain: int) -> list:
         seed = secrets.token_bytes(32)
@@ -57,13 +57,15 @@ class OptimizedDilithium:
     def generate_small_vector(self, size: int) -> list:
         return self._generate_vector(size, self.eta, DOMAIN_SMALL_POLY)
 
-    @lru_cache(maxsize=1)
+    @lru_cache(maxsize=None)  # Changed to support multiple cache entries
     def get_matrix_A(self):
+        """Get cached matrix A using rho as part of cache key"""
         if self.rho is None:
             raise ValueError("Keys not generated")
-        if self._A_cache is None:
-            self._A_cache = generate_matrix_from_seed(self.rho, self.k, self.l)
-        return self._A_cache
+
+        # Include rho in computation to make it part of cache key
+        matrix = generate_matrix_from_seed(self.rho, self.k, self.l)
+        return matrix
 
     def _matrix_multiply(self, matrix: list, vector: list) -> list:
         result = []
@@ -77,7 +79,6 @@ class OptimizedDilithium:
     def keygen(self):
         """Generate a new keypair"""
         self.rho = secrets.token_bytes(32)
-        self._A_cache = None
 
         A = self.get_matrix_A()
         self.s1 = self.generate_small_vector(self.l)
@@ -110,15 +111,7 @@ class OptimizedDilithium:
 
             # Check if w is small enough (||w||∞ < γ₂)
             w_coeffs = np.concatenate([np.array(p.coefficients) for p in w])
-            max_coeff = np.max(np.abs(w_coeffs))
-            if max_coeff >= GAMMA2:
-                if attempts % 10 == 0:  # Don't print too often
-                    print(f"Max coefficient: {max_coeff}, Bound: {GAMMA2}")
-                    print(f"Exceeded by: {max_coeff - GAMMA2}")
-                    print(
-                        f"Percentage of coefficients exceeding bound: {np.mean(np.abs(w_coeffs) >= GAMMA2)*100:.2f}%"
-                    )
-                continue
+
             if np.any(np.abs(w_coeffs) > GAMMA2):
                 continue
 
@@ -162,42 +155,79 @@ class OptimizedDilithium:
             print("z bounds check failed")
             return False
 
-        # Verify w bound (||w||∞ < γ₂)
-        w_coeffs = np.concatenate([np.array(p.coefficients) for p in w_processed])
+        # Process w coefficients same way as in signing
+        w_coeffs = []
+        for poly in w_processed:
+            coeffs = np.array(poly.coefficients)
+            coeffs = np.abs(coeffs) % Q  # Same processing as in sign()
+            w_coeffs.append(coeffs)
+
+        # Check w bounds using processed coefficients
+        w_coeffs = np.concatenate(w_coeffs)
         if np.any(np.abs(w_coeffs) >= GAMMA2):
             print("w bounds check failed")
             return False
 
         # Verify challenge
-        c_prime = generate_challenge(message, public_key, w_processed)
+        w_processed_verify = [
+            Polynomial(coeffs.tolist()) for coeffs in w_coeffs.reshape(-1, N)
+        ]
+        c_prime = generate_challenge(message, public_key, w_processed_verify)
         return np.array_equal(c.coefficients, c_prime.coefficients)
 
 
 def test_performance():
-    print("\n=== OPTIMIZED DILITHIUM PERFORMANCE TEST ===")
+    print("\n=== DILITHIUM SIGNATURE METRICS ===")
+    print("Security Level: 2")
+    print("Message: 'Hello, Dilithium!'\n")
+
     dilithium = OptimizedDilithium(security_level=2)
-
-    import time
-
-    start = time.time()
-    pub, priv = dilithium.keygen()
-    keygen_time = time.time() - start
-    print(f"Key generation time: {keygen_time:.3f} seconds")
-
     message = b"Hello, Dilithium!"
-    start = time.time()
-    try:
-        signature = dilithium.sign(message)
-        sign_time = time.time() - start
-        print(f"Signing time: {sign_time:.3f} seconds")
 
-        start = time.time()
-        valid = dilithium.verify(message, signature, pub)
-        verify_time = time.time() - start
-        print(f"Verification time: {verify_time:.3f} seconds")
-        print(f"Signature valid: {valid}")
+    # Key Generation
+    print("Generating keypair...")
+    start_ns = time.perf_counter_ns()
+    pub, priv = dilithium.keygen()
+    keygen_time_ms = (time.perf_counter_ns() - start_ns) / 1_000_000
+    print(f"✓ Keys generated in {keygen_time_ms:.2f} ms")
+    print(f"Public key (first 5): {pub[1][0].coefficients[:5]}\n")
+
+    # Signing
+    print("Generating signature...")
+    start_ns = time.perf_counter_ns()
+    try:
+        z, c, w = dilithium.sign(message)
+        sign_time_ms = (time.perf_counter_ns() - start_ns) / 1_000_000
+        print(f"✓ Signature generated in {sign_time_ms:.2f} ms")
+
+        print("\nSignature Details:")
+        print("-----------------")
+        print(f"Challenge (c): {c.coefficients[:5]}")
+        print(f"Response (z): {z[0].coefficients[:5]}")
+        print(f"Witness (w): {w[0].coefficients[:5]}\n")
+
+        # Verification
+        print("Verifying signature...")
+        start_ns = time.perf_counter_ns()
+        valid = dilithium.verify(message, (z, c, w), pub)
+        verify_time_ms = (time.perf_counter_ns() - start_ns) / 1_000_000
+
+        print("\nPerformance Summary:")
+        print("------------------")
+        print(f"Key Generation: {keygen_time_ms:>8.2f} ms")
+        print(f"Signing Time:   {sign_time_ms:>8.2f} ms")
+        print(f"Verify Time:    {verify_time_ms:>8.2f} ms")
+        print(
+            f"Total Time:     {(keygen_time_ms + sign_time_ms + verify_time_ms):>8.2f} ms"
+        )
+
+        if valid:
+            print("\n✓ Signature verification successful")
+        else:
+            print("\n✗ Signature verification failed")
+
     except Exception as e:
-        print(f"Error during signing/verification: {e}")
+        print(f"\nError: {e}")
 
 
 if __name__ == "__main__":

@@ -23,8 +23,13 @@ class Polynomial:
         if coefficients is None:
             self.coefficients = np.zeros(self.N, dtype=np.int32)
         else:
-            # Convert to numpy array and handle modulo efficiently
             coeffs = np.array(coefficients[: self.N], dtype=np.int32)
+            # Add check for large coefficients
+            max_coeff = np.max(np.abs(coeffs))
+            if max_coeff > self.Q:
+                print(f"Warning: Large coefficients detected: {max_coeff} > {self.Q}")
+                print("Coefficients will be reduced modulo Q")
+
             self.coefficients = np.pad(
                 coeffs % self.Q, (0, self.N - len(coeffs)), "constant"
             )

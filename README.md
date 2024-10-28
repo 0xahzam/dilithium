@@ -52,22 +52,23 @@ The scheme consists of three main algorithms:
 
 1. **Key Generation**:
 
-   - Generate random seed ρ
-   - Derive matrix A ∈ Rq^(k×l) from ρ
-   - Sample small polynomials s1 ∈ S*η^l, s2 ∈ S*η^k
+   - Generate random seed rho
+   - Derive matrix A in Rq^(k×l) from rho
+   - Sample small polynomials s1 in S_eta^l, s2 in S_eta^k
    - Compute t = As1 + s2
-   - Output (ρ,t) as public key and (s1,s2) as secret key
+   - Output (rho,t) as public key and (s1,s2) as secret key
 
 2. **Signing**:
 
-   - Sample y with coefficients in [-γ1, γ1]
+   - Sample y with coefficients in [-gamma1, gamma1]
    - Compute w = Ay
    - Generate challenge c using w
    - Compute z = y + cs1
    - Output signature (z,c,w)
 
 3. **Verification**:
-   - Check ||z||∞ < γ1 - β
+
+   - Check that infinity norm of z < gamma1 - beta
    - Verify challenge reconstruction
    - Check bounds on w
 

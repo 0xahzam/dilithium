@@ -8,10 +8,11 @@ Key optimizations:
 4. Pre-allocated buffers
 """
 
-from Crypto.Hash import SHAKE128
 import numpy as np
+from Crypto.Hash import SHAKE128
 from functools import lru_cache
-from rings import Polynomial
+
+from dilithium.rings import Polynomial
 
 # Domain separators
 DOMAIN_MATRIX = 0x01
@@ -42,7 +43,7 @@ class OptimizedHasher:
         shake.update(seed + bytes([domain]))
         return shake.read(length)
 
-    def generate_matrix(self, seed: bytes, k: int, l: int) -> list:
+    def generate_matrix(self, seed: bytes, k: int, l: int) -> list:  # noqa: E741
         """
         Optimized matrix generation with caching and vectorized operations.
         """
@@ -156,7 +157,7 @@ def expand_seed(seed: bytes, domain: int, length: int) -> bytes:
     return OptimizedHasher.expand_seed(seed, domain, length)
 
 
-def generate_matrix_from_seed(seed: bytes, k: int, l: int) -> list:
+def generate_matrix_from_seed(seed: bytes, k: int, l: int) -> list:  # noqa: E741
     return HASHER.generate_matrix(seed, k, l)
 
 
@@ -178,24 +179,24 @@ def test_performance():
     start = time.time()
     seed = b"test_seed" * 4
     for _ in range(1000):
-        expanded = expand_seed(seed, DOMAIN_MATRIX, 32)
+        _ = expand_seed(seed, DOMAIN_MATRIX, 32)
     print(f"1000 seed expansions: {time.time() - start:.3f} seconds")
 
     # Test matrix generation
     start = time.time()
-    matrix = generate_matrix_from_seed(seed, 4, 4)
+    _ = generate_matrix_from_seed(seed, 4, 4)
     print(f"4x4 matrix generation: {time.time() - start:.3f} seconds")
 
     # Test cached matrix generation
     start = time.time()
-    matrix = generate_matrix_from_seed(seed, 4, 4)
+    _ = generate_matrix_from_seed(seed, 4, 4)
     print(f"Cached matrix generation: {time.time() - start:.3f} seconds")
 
     # Test challenge generation
     dummy_w1 = [Polynomial([1, 2, 3]) for _ in range(4)]
     start = time.time()
     for _ in range(100):
-        c = generate_challenge(b"test message", (seed, dummy_w1), dummy_w1)
+        _ = generate_challenge(b"test message", (seed, dummy_w1), dummy_w1)
     print(f"100 challenge generations: {time.time() - start:.3f} seconds")
 
 

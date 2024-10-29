@@ -1,16 +1,11 @@
-[tool.poetry]
+[project]
 name = "dilithium"
 version = "0.1.0"
 description = "Implementation of CRYSTALS-DILITHIUM"
-authors = ["Your Name <you@example.com>"]
 readme = "README.md"
-
-[tool.poetry.dependencies]
-python = "^3.13"
-numpy = "^2.1.2"
-pycryptodome = "^3.21.0"
-
-
-[build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=2.1.2",
+    "pycryptodome>=3.21.0",
+    "ruff>=0.7.1",
+]

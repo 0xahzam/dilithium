@@ -72,9 +72,6 @@ class Polynomial:
             # Compute all products for this coefficient at once
             prods = a[i] * b
 
-            # Calculate positions
-            positions = (i + indices) % self.N
-
             # Apply signs based on reduction by X^N + 1
             signs = np.where(i + indices >= self.N, -1, 1)
 
